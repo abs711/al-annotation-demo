@@ -1,0 +1,140 @@
+<title>Pathology Annotation Station</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{--ground:#f6f3f8;--win:#fff;--bar:#ece5f1;--panel:#f9f6fb;--edge:#ded4e6;--edge2:#cfc2db;
+ --ink:#1c1722;--ink2:#554d60;--ink3:#8b8195;--accent:#0e7d8f;--soft:#d8f0f4;--aink:#074854;
+ --live:#b4306a;--good:#1a6c45;--amber:#8a5410;
+ --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;--sans:"IBM Plex Sans",system-ui,sans-serif;
+ --sh:0 1px 2px rgba(28,23,34,.07),0 10px 34px rgba(28,23,34,.09)}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--ground:#141019;--win:#1d1824;--bar:#262030;
+ --panel:#221c2b;--edge:#352c41;--edge2:#463a55;--ink:#f4eff8;--ink2:#b5aac1;--ink3:#7d7289;
+ --accent:#4fd9e9;--soft:#143037;--aink:#a3edf7;--live:#ff6fa8;--good:#6ddca2;--amber:#f2b06a;
+ --sh:0 1px 2px rgba(0,0,0,.55),0 14px 40px rgba(0,0,0,.5)}}
+:root[data-theme=dark]{--ground:#141019;--win:#1d1824;--bar:#262030;--panel:#221c2b;--edge:#352c41;--edge2:#463a55;
+ --ink:#f4eff8;--ink2:#b5aac1;--ink3:#7d7289;--accent:#4fd9e9;--soft:#143037;--aink:#a3edf7;
+ --live:#ff6fa8;--good:#6ddca2;--amber:#f2b06a;--sh:0 1px 2px rgba(0,0,0,.55),0 14px 40px rgba(0,0,0,.5)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+.page{max-width:1080px;margin:0 auto;padding-inline:18px;padding-block:14px 26px}
+.intro{margin:0 0 11px}
+.intro h1{font-size:clamp(1.15rem,2.3vw,1.45rem);margin:0;font-weight:600;letter-spacing:-.02em}
+.intro p{margin:4px 0 0;color:var(--ink2);max-width:74ch;font-size:.85rem}
+.eyebrow{font-family:var(--mono);font-size:.64rem;letter-spacing:.15em;text-transform:uppercase;color:var(--accent);margin:0 0 4px}
+.win{background:var(--win);border:1px solid var(--edge);border-radius:11px;box-shadow:var(--sh);overflow:hidden}
+.tb{display:flex;align-items:center;gap:11px;padding:8px 12px;background:var(--bar);border-bottom:1px solid var(--edge)}
+.dots{display:flex;gap:6px}.dots i{width:9px;height:9px;border-radius:50%;background:var(--edge2);display:block}
+.tt{font-family:var(--mono);font-size:.72rem;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tb .r{margin-left:auto;display:flex;gap:9px;align-items:center}
+.chip{font-family:var(--mono);font-size:.71rem;padding:3px 9px;border-radius:999px;background:var(--soft);
+ color:var(--aink);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);font-variant-numeric:tabular-nums}
+.tbtn{font-family:var(--mono);font-size:.67rem;background:transparent;border:1px solid var(--edge2);color:var(--ink2);
+ border-radius:6px;padding:4px 8px;cursor:pointer}.tbtn:hover{color:var(--ink);border-color:var(--accent)}
+.body{display:grid;grid-template-columns:minmax(0,1fr) 252px}
+@media(max-width:840px){.body{grid-template-columns:minmax(0,1fr)}}
+.work{padding:11px;border-right:1px solid var(--edge);display:flex;flex-direction:column;gap:8px;min-width:0}
+@media(max-width:840px){.work{border-right:0;border-bottom:1px solid var(--edge)}}
+.protos{display:flex;gap:5px;flex-wrap:wrap}
+.proto{font-family:var(--mono);font-size:.69rem;padding:5px 9px;border-radius:6px;border:1px solid var(--edge2);
+ background:var(--win);color:var(--ink2);cursor:pointer;display:flex;gap:6px;align-items:center}
+.proto i{width:9px;height:9px;border-radius:2px;display:block}
+.proto[aria-pressed=true]{border-color:var(--accent);background:var(--soft);color:var(--aink);font-weight:600}
+.ctx{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:.66rem;color:var(--ink3);cursor:pointer}
+.ctx input{accent-color:var(--accent);margin:0}
+.proto .rec{font-size:.56rem;letter-spacing:.06em;padding:1px 4px;border-radius:3px;
+ background:color-mix(in srgb,var(--amber) 22%,transparent);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 45%,transparent)}
+.qh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.qh h2{font-family:var(--mono);font-size:.63rem;letter-spacing:.11em;text-transform:uppercase;color:var(--ink3);margin:0;font-weight:500}
+.qh em{font-style:normal;font-family:var(--mono);font-size:.66rem;color:var(--ink2)}
+.queue{display:flex;gap:5px;flex-wrap:wrap}
+.q{position:relative;width:36px;height:36px;border-radius:5px;overflow:hidden;border:1.5px solid var(--edge);
+ opacity:.4;transition:opacity .22s,border-color .22s,transform .22s}
+.q img{width:100%;height:100%;object-fit:cover;display:block}
+.q.active{opacity:1;border-color:var(--live);transform:scale(1.09)}
+.q.done{opacity:1;border-color:var(--good)}
+.q.done::after{content:"";position:absolute;inset:0;background:color-mix(in srgb,var(--good) 28%,transparent)}
+.q.done::before{content:"✓";position:absolute;inset:0;z-index:1;display:grid;place-items:center;color:#fff;
+ font-size:15px;font-weight:700;text-shadow:0 1px 3px rgba(0,0,0,.6)}
+.sw{position:relative;aspect-ratio:1/1;height:clamp(190px,38vh,368px);width:auto;max-width:100%;margin-inline:auto;
+ background:#0b080f;border-radius:8px;overflow:hidden;border:1px solid var(--edge)}
+canvas.l{position:absolute;inset:0;width:100%;height:100%;display:block}
+.train{position:absolute;inset:0;display:none;place-items:center;background:rgba(10,7,14,.84);color:#fff;text-align:center;padding:16px}
+.train.on{display:grid}
+.tbx{font-family:var(--mono);font-size:.8rem;display:flex;flex-direction:column;gap:9px;align-items:center}
+.spin{width:34px;height:34px;border-radius:50%;border:3px solid rgba(255,255,255,.22);border-top-color:var(--accent);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.tp{width:180px;height:5px;border-radius:3px;background:rgba(255,255,255,.18);overflow:hidden}.tp i{display:block;height:100%;background:var(--accent);width:0}
+.st{display:flex;gap:7px;align-items:center;font-family:var(--mono);font-size:.71rem;color:var(--ink2);min-height:19px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--live);flex:none}
+.panel{padding:11px;display:flex;flex-direction:column;gap:10px;background:var(--panel);min-width:0}
+.sec h3{font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink3);margin:0 0 7px;font-weight:500}
+.curve{width:100%;aspect-ratio:16/10;display:block;border:1px solid var(--edge);border-radius:6px;background:var(--win)}
+.kv{display:grid;grid-template-columns:1fr auto;gap:4px 9px;font-family:var(--mono);font-size:.76rem}
+.kv dt{color:var(--ink3);font-size:.7rem}.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;font-weight:500}
+.kv dd.up{color:var(--good)}
+.bar{height:6px;border-radius:3px;background:var(--bar);border:1px solid var(--edge);overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .4s}
+.stages{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.sg{font-family:var(--mono);font-size:.66rem;padding:5px 6px;border-radius:5px;border:1px solid var(--edge);color:var(--ink3);display:flex;gap:5px}
+.sg.on{border-color:var(--accent);background:var(--soft);color:var(--aink);font-weight:600}
+.tr{display:flex;align-items:center;gap:8px;padding:9px 12px;border-top:1px solid var(--edge);background:var(--bar);flex-wrap:wrap}
+.b{font-family:var(--mono);font-size:.72rem;padding:6px 11px;border-radius:6px;border:1px solid var(--edge2);background:var(--win);color:var(--ink);cursor:pointer}
+.b.p{background:var(--accent);border-color:var(--accent);color:var(--win);font-weight:600}
+.b:hover{border-color:var(--accent)}
+.b:focus-visible,.tbtn:focus-visible,.proto:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.spd{display:flex;align-items:center;gap:6px;margin-left:auto;font-family:var(--mono);font-size:.66rem;color:var(--ink3)}
+input[type=range]{accent-color:var(--accent);width:86px}
+.lg{display:flex;flex-wrap:wrap;gap:4px 9px;font-family:var(--mono);font-size:.64rem;color:var(--ink2)}
+.lg span{display:flex;align-items:center;gap:4px}.lg i{width:8px;height:8px;border-radius:2px}
+.foot{margin-top:12px;color:var(--ink2);font-size:.8rem;max-width:76ch;border-left:2px solid var(--accent);padding-left:12px}
+.foot b{color:var(--ink)}.foot .warn{color:var(--amber)}
+@media(prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+<div class="page">
+<div class="intro"><p class="eyebrow">Active learning · BCSS · three feedback protocols</p>
+<h1>The annotation loop, as it runs</h1>
+<p>The model proposes where it is uncertain, a pathologist confirms the tissue class, the adapters retrain,
+performance is logged — thirty rounds. Switch protocol to see how the annotator's work, and the cost, change.</p></div>
+
+<div class="win">
+ <div class="tb"><div class="dots"><i></i><i></i><i></i></div>
+  <span class="tt" id="tt">annotation-station</span>
+  <div class="r"><span class="chip" id="chip">iteration 0 / 29</span>
+  <button class="tbtn" id="theme" type="button">theme</button></div></div>
+ <div class="body">
+  <div class="work">
+   <div class="protos" id="protos"></div>
+   <label class="ctx"><input type="checkbox" id="outside"> show surrounding context</label>
+   <div class="qh"><h2>Review queue</h2><em id="qi">—</em></div>
+   <div class="queue" id="queue"></div>
+   <div class="sw">
+    <canvas class="l" id="c1"></canvas><canvas class="l" id="c2"></canvas><canvas class="l" id="c3"></canvas>
+    <div class="train" id="train"><div class="tbx"><div class="spin"></div><div>fine-tuning adapters</div>
+     <div style="color:#9fe9f3" id="tsub">10 epochs</div><div class="tp"><i id="tp"></i></div></div></div>
+   </div>
+   <div class="st"><span class="dot"></span><span id="status">ready</span></div>
+   <div class="lg" id="lg"></div>
+  </div>
+  <div class="panel">
+   <div class="sec"><h3>Macro Dice · w/o background</h3><canvas class="curve" id="curve"></canvas>
+    <dl class="kv" style="margin-top:8px"><dt>Validation</dt><dd id="mv">—</dd><dt>Test</dt><dd id="mt">—</dd></dl></div>
+   <div class="sec"><h3>Annotation budget</h3><dl class="kv">
+    <dt>Regions labelled</dt><dd id="mi">—</dd><dt>Pixels of dataset</dt><dd id="mp">—</dd></dl>
+    <div class="bar"><i id="mb"></i></div></div>
+   <div class="sec"><h3>Loop stage</h3><div class="stages">
+    <div class="sg" data-s="select">1 select</div><div class="sg" data-s="annotate">2 annotate</div>
+    <div class="sg" data-s="train">3 train</div><div class="sg" data-s="evaluate">4 evaluate</div></div></div>
+  </div>
+ </div>
+ <div class="tr"><button class="b p" id="play" type="button">▶ Play</button>
+  <button class="b" id="step" type="button">⏭ Step stage</button>
+  <button class="b" id="rst" type="button">⏮ Restart</button>
+  <label class="spd">speed <input type="range" id="spd" min="1" max="6" value="3"></label></div>
+</div>
+<p class="foot"><b>What is real:</b> tiles and class masks are BCSS pool images; the contiguous blobs are the
+run's own P93 entropy contours after thin-island removal; every Dice, region count and pixel percentage is the
+measured value for that protocol's run at epoch 8. <span class="warn">What is reconstructed:</span> the sparse
+pixel set is recovered by inverting the colormap of the saved entropy figure and taking the top 5% — it follows
+the real P95 rule but is not the original array. The cursor path and the class-picker are a depiction of the
+annotator's actions.</p>
+</div>

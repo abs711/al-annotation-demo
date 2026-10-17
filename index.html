@@ -496,6 +496,12 @@ function render(a,task){
  ID(g3);g3.clearRect(0,0,S,S);
  if(!a||!sub||!sub.list)return;
  T(g3);g3.lineWidth=2/view.s;
+ // the region's own edge. The neighbourhood continues past it, so without this the
+ // boundaries that run edge to edge (closed by the frame) would read as open.
+ g3.save();g3.lineJoin='miter';
+ g3.strokeStyle='rgba(20,14,26,.35)';g3.lineWidth=3.2/view.s;g3.strokeRect(0,0,S,S);
+ g3.strokeStyle='rgba(255,255,255,.88)';g3.lineWidth=1.5/view.s;g3.strokeRect(0,0,S,S);
+ g3.restore();
  if(mode==='contour'){g3.save();g3.strokeStyle='rgba(79,217,233,.55)';g3.setLineDash([4/view.s,4/view.s]);
   for(let i=sub.ti+1;i<sub.list.length;i++){const b=sub.list[i];g3.beginPath();g3.arc(b.x,b.y,b.r,0,7);g3.stroke()}
   g3.restore();

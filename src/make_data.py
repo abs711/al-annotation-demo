@@ -3,16 +3,14 @@ from PIL import Image
 from scipy import ndimage
 import matplotlib; matplotlib.use('Agg'); import matplotlib.image as mpimg
 from matplotlib import cm
-# Source run outputs. Override with AL_ROOT=/path/to/ActiveLearningSegmentation
-ROOT=os.environ.get('AL_ROOT', os.path.expanduser('~/ActiveLearningSegmentation'))
-FSW=os.environ.get('AL_FSW', f'{ROOT}/finetune-SAM-Winter')
+ROOT=os.path.expanduser('~/ActiveLearningSegmentation'); FSW=f'{ROOT}/finetune-SAM-Winter'
 SP=os.path.dirname(os.path.abspath(__file__))
 S=448; MID=200; THUMB=72
-SHOW=[1,2,5,10,15,25,29]        # iterations the demo visits; the run itself has 30
-DETAIL=[1,2]; NDET=2; QF=10; QFAST=10   # every iteration selects 10 (NUM_SELECTIONS)
+SHOW=[1,2,5,10,15,25,28,29]     # iterations the demo visits; the run itself has 30
+DETAIL=[1,2,28]; NDET=2; QF=10; QFAST=10   # every iteration selects 10 (NUM_SELECTIONS)
 CC={0:(0,0,0),1:(255,214,10),2:(220,38,58),3:(45,125,210),4:(34,185,110),5:(168,85,220)}
 CN={0:'outside',1:'other',2:'tumor',3:'stroma',4:'inflammatory',5:'necrosis'}
-sel=json.load(open(os.environ.get('AL_MODE_RUNS','/tmp/mode_runs.json')))
+sel=json.load(open('/tmp/mode_runs.json'))
 px={}
 for r in csv.DictReader(open(f'{FSW}/mnt_data_format/pixel_cost_by_iter.csv')):
     px.setdefault(r['run'],{})[int(round(float(r['images'])))]=float(r['pct_pixels'])
@@ -58,8 +56,10 @@ def blobmask(fig):
 def entropy(fig):
     c=crop(fig,0)
     if c is None: return None
-    lut=(cm.viridis(np.linspace(0,1,256))[:,:3]*255).astype(np.int16)
-    sm=np.array(Image.fromarray((c[...,:3]*255).astype('uint8')).resize((S,S),Image.BILINEAR)).astype(np.int16)
+    # int32, NOT int16: (255-68)^2 = 34969 overflows int16, the squared distances
+    # wrap negative and argmin then returns the OPPOSITE end of the colormap
+    lut=(cm.viridis(np.linspace(0,1,256))[:,:3]*255).astype(np.int32)
+    sm=np.array(Image.fromarray((c[...,:3]*255).astype('uint8')).resize((S,S),Image.NEAREST)).astype(np.int32)
     e=(((sm[:,:,None,:]-lut[None,None,:,:])**2).sum(-1).argmin(-1)/255.).astype(np.float32)
     return _delegend(e)
 
@@ -143,20 +143,26 @@ for d in SER['contour']:
             # contour mode annotates the post-filter islands, so what matters for THAT
             # protocol is how many classes the islands themselves span
             g112=np.array(Image.fromarray(gtq).resize((112,112),Image.NEAREST))
-            lb,nb=ndimage.label(bmq); ks=[]
+            lb,nb=ndimage.label(bmq); ks=[]; sizes=[]
             for j in range(1,nb+1):
                 ys,xs=np.nonzero(lb==j)
                 if len(ys)<26: continue
+                sizes.append(len(ys))
                 kk=np.bincount(g112[np.minimum(111,ys*112//S),np.minimum(111,xs*112//S)],minlength=6)
                 kk[0]=0
                 if kk.sum(): ks.append(int(kk.argmax()))
             if not ks: continue
             nk=len(set(ks))
+            # ...and how big the islands are. Early iterations scatter the smoothed
+            # map into many tiny peaks; late ones consolidate. Without this the
+            # picker happily chose a tile whose only island was 208px.
+            big=max(sizes) if sizes else 0
+            mass=0.5*min(1.5, np.log10(max(big,1)/200.0)) if big>200 else 0.0
             g112=g112.ravel()
             mx,loops,tot,njobs=full_cost(g112)
             if mx>8 or loops>4 or tot>900: continue      # unhumanly tangled for full feedback
-            sc.append((div+0.8*(1-h[1:].max())+0.7*(nk-1), rk, base, panel, h, nk, ks,
-                       (mx,loops,tot,njobs)))
+            sc.append((div+0.8*(1-h[1:].max())+0.7*(nk-1)+mass, rk, base, panel, h, nk, ks,
+                       (mx,loops,tot,njobs,big)))
         # Three tiers for the contour demo. Islands spanning several classes first;
         # a tile whose islands are ALL 'other' (the catch-all class) is the last resort.
         by=lambda f:sorted([r for r in sc if f(r)],key=lambda z:-z[0])
@@ -171,7 +177,7 @@ for d in SER['contour']:
             top=sorted(((v,k) for k,v in enumerate(h) if k),reverse=True)[:3]
             print(f"    detail it{it} rank{rk} {base[:20]} score={tot:.2f} "
                   +" ".join(f"{CN[k]}:{round(100*v)}%" for v,k in top if v>.02)
-                  +f" | blobs {[CN[k] for k in ks]} | full: {fc[3]}jobs {fc[0]}curves {fc[1]}loops {fc[2]}pts")
+                  +f" | islands {sorted(sizes,reverse=True)[:4]} | full: {fc[0]}c/{fc[1]}L/{fc[2]}p")
     q=[]
     for rk,base,score,panel in pool:
         im=Image.open(f'{ROOT}/merged_dataset/img/{base}.jpg').convert('RGB')
@@ -207,5 +213,5 @@ for d in SER['contour']:
     iters.append({'iter':it,'queue':q,'detail':det})
     if True: print(f"  iter{it:<3} queue={len(q)} detailed={sum('he' in x for x in q)}")
 out=dict(runs=sel, series=SER, iters=iters, class_names=CN, class_colors=CC, S=S, G=112)
-p=os.environ.get('AL_OUT', f'{SP}/data/station.json'); json.dump(out,open(p,'w'))
+p=f'{SP}/demo_assets/station2.json'; json.dump(out,open(p,'w'))
 print(f"\n  wrote {p}  {os.path.getsize(p)/1e6:.2f} MB")

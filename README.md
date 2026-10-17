@@ -25,7 +25,16 @@ Three protocols, switchable mid-run:
 | **Contiguous blobs** | the P93 islands after thin-island removal | confirm an island and name it — drawing a dividing line through it first when it holds two classes |
 
 Two tiles per detailed iteration are annotated step by step; the rest
-fast-forward, sweeping on the labels that protocol would have produced.
+fast-forward, showing the labels that protocol would have produced — or stating
+plainly when a round yields nothing (under contour feedback, ~45% of selected
+tiles have no island survive the thin-island filter in a given round).
+
+**Where the regions come from.** A navigator beside the stage shows the pool
+(all 105 slides, the 10 picks of the round outlined) and the current slide as its
+grid of regions — picked this round, picked in an earlier round, the one being
+annotated. Slides are revisited: 74% of touched slides are selected from again in
+a later iteration. Panning past a region's edge shows the real neighbouring tiles
+of that slide, not black.
 
 Controls: play/pause, step one stage, speed, and **show surrounding context** to
 lift the dimming and see a proposal in its tissue.
@@ -71,14 +80,16 @@ That is the whole build: no bundler, no dependencies, no node. Edit
 `src/page.html` or `src/app.js` and run it again.
 
 Regenerating the data needs the original run outputs and is only necessary when
-those change:
+those change. Two steps, in order:
 
 ```bash
-AL_ROOT=/path/to/ActiveLearningSegmentation python src/make_data.py
+AL_ROOT=/path/to/ActiveLearningSegmentation python src/make_data.py    # tiles, metrics, proposals
+AL_ROOT=/path/to/ActiveLearningSegmentation python src/make_slides.py  # pool wall, slide grids, neighbours
 ```
 
-It reads the entropy maps, the tile images and masks, and the per-iteration
-evaluation CSVs, and writes `src/data/station.json`. Requires numpy, Pillow,
+`make_data.py` reads the entropy maps, the tile images and masks, and the
+per-iteration evaluation CSVs, and writes `src/data/station.json`;
+`make_slides.py` adds the slide-level data to that file. Requires numpy, Pillow,
 scipy and matplotlib.
 
 ## Layout
@@ -88,9 +99,10 @@ scipy and matplotlib.
 | `index.html` | the built page — the only file needed to view it |
 | `src/page.html` | markup, `<title>`, CSS |
 | `src/app.js` | the application: geometry, protocols, animation |
-| `src/data/station.json` | run data — metrics, tiles, label maps, proposal masks |
+| `src/data/station.json` | run data — metrics, tiles, label maps, proposal masks, slides |
 | `src/build.py` | inlines the three into `index.html` |
 | `src/make_data.py` | regenerates `station.json` from the run outputs |
+| `src/make_slides.py` | adds the pool wall, slide grids, picks and neighbourhood mosaics |
 
 ## How it works
 
@@ -108,9 +120,11 @@ The protocols are generated from the data rather than scripted:
 - **Contiguous** traces each island's true outline at pixel resolution, dims
   everything outside it, and splits it along the interface when it holds more
   than one class.
-- **Partial** decides per clump: one box if it is uniform, a quadtree of smaller
-  boxes if its classes sit in separate corners, and pixel-by-pixel only when
-  under 70% of it can be covered by pure boxes.
+- **Partial** treats a box as labelling every proposed pixel inside it, so a box
+  is only drawn where its contents are a single class: clumps are subdivided
+  into tight single-class boxes and whatever cannot be isolated that way is
+  clicked pixel by pixel, each with its own class. Proposals are shown as the
+  real tissue through a dim veil rather than as coloured dots.
 
 The camera behaves like an imaging tool — discrete zoom notches rather than a
 cinematic glide, and a pan at the current magnification when the next target is

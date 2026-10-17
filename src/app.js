@@ -3,6 +3,8 @@ const S=D.S,G=D.G,CC=D.class_colors,CN=D.class_names,SER=D.series,ITS=D.iters;
 const PR=[{id:'full',n:'Full feedback',c:'#c4476a',h:'zoom · draw boundary · class each side'},
           {id:'partial',n:'Partial pixels',c:'#f0a868',h:'zoom · pick class · brush pixels'},
           {id:'contour',n:'Contiguous blobs',c:'#4fd9e9',h:'zoom · confirm region · pick class'}];
+const SL=D.slides||[], SLBY={}; for(const x of SL)SLBY[x.id]=x;
+const POOL=D.pool||null;
 const $=i=>document.getElementById(i);
 const c1=$('c1'),c2=$('c2'),c3=$('c3');
 const K=Math.max(1,Math.min(2.5,Math.round(devicePixelRatio||1)));  // retina backing store
@@ -10,6 +12,7 @@ const K=Math.max(1,Math.min(2.5,Math.round(devicePixelRatio||1)));  // retina ba
 const g1=c1.getContext('2d'),g2=c2.getContext('2d'),g3=c3.getContext('2d');
 const labCv=document.createElement('canvas');labCv.width=labCv.height=S;const gl=labCv.getContext('2d');
 const ID=g=>g.setTransform(K,0,0,K,0,0);                            // canvas units stay S
+const BG='#f6f3f6';            // glass, not black: what a scan shows where there is no tissue
 const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 let mode='contour',qi=0,it=ITS[0].iter,stage='select',playing=false,spd=3,sub=null,last=0,cache=new Map(),gen=0;
 let view={s:1,cx:S/2,cy:S/2}, vt={s:1,cx:S/2,cy:S/2}, vTw=null, showOut=false;
@@ -143,20 +146,22 @@ function regions(gt){const {lab,R}=regionMap(gt),sc=S/G,drawn=new Set(),out=[];
     bbox:{x0:x0*sc,x1:(x1+1)*sc,y0:y0*sc,y1:(y1+1)*sc},
     x:(anc%G+.5)*sc, y:(((anc/G)|0)+.5)*sc})}
  return out}
-function quadBoxes(pts){const MIN=14,out=[];
+/* A box labels EVERY proposed pixel inside it with one class, so a box is only
+   legitimate when its contents are a single class. Subdivide until each cell is
+   pure (or too small / too sparse to be worth a box); what is left over has to be
+   clicked pixel by pixel. That leftover is the real cost of partial feedback. */
+function quadBoxes(pts){const MIN=8,out=[],rest=[];
  const rec=(sub,x0,y0,x1,y1)=>{
-  if(sub.length<5)return;
+  if(!sub.length)return;
   const c={};for(const q of sub)c[q[2]]=(c[q[2]]||0)+1;
-  const k=+Object.keys(c).reduce((a,b)=>c[a]>c[b]?a:b);
-  if(c[k]/sub.length>=0.85){out.push({k,px:sub,pur:c[k]/sub.length,
-    bbox:bboxOf(sub.map(q=>({x:q[0],y:q[1]})))});return}
-  if(x1-x0<MIN||y1-y0<MIN)return;
+  const ks=Object.keys(c);
+  if(ks.length===1&&sub.length>=4){out.push({k:+ks[0],px:sub,bbox:bboxOf(sub.map(q=>({x:q[0],y:q[1]})))});return}
+  if(x1-x0<MIN||y1-y0<MIN||sub.length<4){rest.push(...sub);return}
   const mx=(x0+x1)>>1,my=(y0+y1)>>1,
    q=(a,b,c2,d2)=>rec(sub.filter(z=>z[0]>=a&&z[0]<=c2&&z[1]>=b&&z[1]<=d2),a,b,c2,d2);
   q(x0,y0,mx,my);q(mx+1,y0,x1,my);q(x0,my+1,mx,y1);q(mx+1,my+1,x1,y1)};
- const b=bboxOf(pts.map(q=>({x:q[0],y:q[1]})));
- rec(pts,b.x0,b.y0,b.x1,b.y1);
- return out.sort((x,y)=>y.px.length-x.px.length).slice(0,4)}
+ const b=bboxOf(pts.map(q=>({x:q[0],y:q[1]})));rec(pts,b.x0,b.y0,b.x1,b.y1);
+ out.sort((x,y)=>y.px.length-x.px.length);return {boxes:out,rest}}
 function islandTask(b,gt){
  const c={};for(const p of b.px){const k=gtAt(gt,p%S,(p/S)|0);if(k)c[k]=(c[k]||0)+1}
  const tot=Object.values(c).reduce((x,y)=>x+y,0); if(!tot)return null;
@@ -185,51 +190,28 @@ function islandTask(b,gt){
    most of its mass sits in jagged islands of 100-1400px, with a few hundred loose
    pixels around them. Islands get the island treatment (outline, bulk or split);
    the loose pixels get point-and-click. */
-function clusters(a){const m=a.sparse,gt=a.gt,big=comps(m,80);
- let total=0;for(let p=0;p<S*S;p++)if(m[p])total++;
- const top=big.slice(0,2);
- // judge "is this tile island-shaped?" on ALL its islands, but only work the top two
- const islMass=big.reduce((n,b)=>n+b.px.length,0);
- // some tiles are genuinely scatter: nearly every proposed pixel stands alone.
- // Showing a token "island" there would misrepresent them, so show none.
- const isl=(islMass/Math.max(1,total)>=0.15)?top.map(b=>islandTask(b,gt)).filter(Boolean):[];
- const used=new Uint8Array(S*S);
- for(const b of (isl.length?big:[]))for(const p of b.px)used[p]=1;
- const CELL=8,by={};
- for(let p=0;p<S*S;p++){if(!m[p]||used[p])continue;
-  const x=p%S,y=(p/S)|0,k=gtAt(gt,x,y); if(!k)continue;
+function clusters(a){const m=a.sparse,gt=a.gt,CELL=8,by={};
+ // Tasks are spatial and disjoint: each grid cell owns EVERY proposed pixel inside
+ // it, dense island or lone speck alike. Earlier, islands were separate tasks whose
+ // pixels were carved out of the cells they sat in -- so a box over a cell could
+ // contain bright pixels that belonged to another task and never got labelled.
+ for(let p=0;p<S*S;p++){if(!m[p])continue;const x=p%S,y=(p/S)|0,k=gtAt(gt,x,y);if(!k)continue;
   const key=((y/(S/CELL))|0)+','+((x/(S/CELL))|0);(by[key]=by[key]||[]).push([x,y,k])}
- const dom=v=>{const c={};for(const q of v)c[q[2]]=(c[q[2]]||0)+1;
-  return +Object.keys(c).reduce((x,y)=>c[x]>c[y]?x:y)};
  const all=Object.values(by).filter(v=>v.length>=12).sort((x,y)=>y.length-x.length);
- const seen=new Set(),pick=[];
- for(const v of all){const k=dom(v);if(!seen.has(k)){seen.add(k);pick.push(v)}}
- for(const v of all)if(pick.indexOf(v)<0)pick.push(v);
- const made=pick.map(v=>{const c={};for(const q of v)c[q[2]]=(c[q[2]]||0)+1;
-   const d=+Object.keys(c).reduce((x,y)=>c[x]>c[y]?x:y),purity=c[d]/v.length;
-   const bb=bboxOf(v.map(q=>({x:q[0],y:q[1]})));
-   // one box if the clump is uniform; a few smaller boxes if its classes sit in
-   // separate corners; only genuinely interleaved pixels are worth clicking singly
-   let boxes = purity>=0.8 ? [{k:d,px:v,pur:purity,bbox:bb}] : quadBoxes(v);
-   const seen=new Set();for(const b of boxes)for(const q of b.px)seen.add(q);
-   let rest=v.filter(q=>!seen.has(q));
-   if(boxes.length>1&&(v.length-rest.length)/v.length<0.70){boxes=[];rest=v}
-   if(!boxes.length)rest=v;
-   return {t:'brush',pts:v,k:d,purity,boxes,rest,bbox:bb,
-     cover:(v.length-rest.length)/v.length,pure:boxes.length===1}});
- // show both kinds: one clump that can be boxed in one go, one that genuinely
- // needs a class per pixel because it straddles a tissue border
- const big2=made.filter(z=>z.pts.length>=16);
- const one =big2.filter(z=>z.boxes.length===1).sort((x,y)=>y.pts.length-x.pts.length);
- const many=big2.filter(z=>z.boxes.length>1).sort((x,y)=>y.boxes.length-x.boxes.length);
- const dots=big2.filter(z=>!z.boxes.length).sort((x,y)=>x.purity-y.purity);
- const want=isl.length?3:4, spk=[];
- for(const g of [one,many,dots,many,dots,one])            // one of each, then top up
-  for(const z of g){if(spk.length>=want)break;if(spk.indexOf(z)<0){spk.push(z);break}}
- for(const z of one.concat(many,dots)){if(spk.length>=want)break;if(spk.indexOf(z)<0)spk.push(z)}
- const out=[];
- for(let i=0;i<Math.max(isl.length,spk.length);i++){if(isl[i])out.push(isl[i]);if(spk[i])out.push(spk[i])}
- return out}
+ const mk=v=>{const {boxes,rest}=quadBoxes(v),c={};for(const q of v)c[q[2]]=(c[q[2]]||0)+1;
+  const d=+Object.keys(c).reduce((x,y)=>c[x]>c[y]?x:y),bb=bboxOf(v.map(q=>({x:q[0],y:q[1]})));
+  return {t:'brush',pts:v,k:d,purity:c[d]/v.length,nk:Object.keys(c).length,boxes,rest,bbox:bb,
+    cover:(v.length-rest.length)/v.length,pure:boxes.length===1&&!rest.length}};
+ const T=all.map(mk);
+ // span the range of what partial annotation costs: a clump that boxes in one
+ // gesture, one that needs several tight boxes, one that is mostly clicks; then the
+ // densest of what remains
+ const one=T.filter(z=>z.pure).sort((x,y)=>y.pts.length-x.pts.length),
+       many=T.filter(z=>!z.pure&&z.cover>=.5).sort((x,y)=>y.boxes.length-x.boxes.length),
+       dots=T.filter(z=>z.cover<.5).sort((x,y)=>x.cover-y.cover);
+ const pick=[];for(const g of [one,many,dots,many,one])for(const z of g){if(pick.length>=5)break;if(pick.indexOf(z)<0){pick.push(z);break}}
+ for(const z of T){if(pick.length>=5)break;if(pick.indexOf(z)<0)pick.push(z)}
+ return pick}
 function idxMap(im,W){const c=document.createElement('canvas');c.width=c.height=W;
  const g=c.getContext('2d');g.imageSmoothingEnabled=false;g.drawImage(im,0,0,W,W);
  const d=g.getImageData(0,0,W,W).data,u=new Uint8Array(W*W);
@@ -242,16 +224,17 @@ async function fastOverlay(t){const key=t.name+'|'+mode;
  if(fcache.has(key))return fcache.get(key);
  const gt=idxMap(await load(t.gtp),G);
  const cv=document.createElement('canvas');cv.width=cv.height=S;const g=cv.getContext('2d');
+ let painted=false;
  if(mode==='full'){const u=S/G;
-  for(let i=0;i<G*G;i++){const k=gt[i];if(!k)continue;
+  for(let i=0;i<G*G;i++){const k=gt[i];if(!k)continue;painted=true;
    g.fillStyle=`rgba(${CC[k]},.80)`;g.fillRect((i%G)*u,((i/G)|0)*u,u+.7,u+.7)}}
  else{const src=mode==='contour'?t.blob:t.sparse;
   if(src){const im=await load(src),W=im.width||224,m=idxMap(im,W),u=S/W;
    for(let p=0;p<W*W;p++){if(m[p]<128)continue;
     const x=p%W,y=(p/W)|0,k=gt[Math.min(G-1,((y*G/W)|0))*G+Math.min(G-1,((x*G/W)|0))];
-    if(!k)continue;
+    if(!k)continue;painted=true;
     g.fillStyle=`rgb(${CC[k]})`;g.fillRect(x*u,y*u,u+.6,u+.6)}}}
- fcache.set(key,cv);return cv}
+ cv.empty=!painted; fcache.set(key,cv);return cv}
 async function assets(t){if(cache.has(t.name))return cache.get(t.name);
  const img=await load(t.he),bi=await load(t.blob),si=await load(t.sparse),gi=await load(t.gtp);
  const cv=document.createElement('canvas');cv.width=cv.height=S;const g=cv.getContext('2d');
@@ -261,10 +244,14 @@ async function assets(t){if(cache.has(t.name))return cache.get(t.name);
  const m=readMask(bi),sm=readMask(si);
  const scv=document.createElement('canvas');scv.width=scv.height=S;   // 10k proposals: one layer
  const sg=scv.getContext('2d'),sd=sg.createImageData(S,S);
- for(let p=0;p<S*S;p++){if(!sm[p])continue;const o=p*4;
-  sd.data[o]=255;sd.data[o+1]=198;sd.data[o+2]=112;sd.data[o+3]=225}
+ // a dim veil with a hole at every proposed pixel: proposals show as real tissue at
+ // full brightness, everything else sits behind the veil. No colour is added, so a
+ // labelled pixel is the only coloured thing on the tile.
+ for(let p=0;p<S*S;p++){const o=p*4;if(sm[p]){sd.data[o+3]=0;continue}
+  sd.data[o]=9;sd.data[o+1]=6;sd.data[o+2]=13;sd.data[o+3]=255}
  sg.putImageData(sd,0,0);
- const a={img,blobs:comps(m,26),gt:idxMap(gi,G),sparse:sm,sparseCv:scv};
+ const a={img,blobs:comps(m,26),gt:idxMap(gi,G),sparse:sm,sparseCv:scv,ctx:t.ctx||null,ctxImg:null};
+ if(t.ctx)load(t.ctx.img).then(im=>{a.ctxImg=im}).catch(()=>{});
  a.bnds=regions(a.gt); a.clusters=clusters(a);
  cache.set(t.name,a);return a}
 function tasks(a){
@@ -277,7 +264,9 @@ function paintCells(cl,k){gl.fillStyle=`rgba(${CC[k]},.78)`;const s=S/G;
 function paintPx(px,k){const d=gl.getImageData(0,0,S,S),C=CC[k];
  for(const p of px){const o=p*4;d.data[o]=C[0];d.data[o+1]=C[1];d.data[o+2]=C[2];d.data[o+3]=235}
  gl.putImageData(d,0,0)}
-function paintDot(x,y,k){gl.fillStyle=`rgba(${CC[k]},.95)`;gl.beginPath();gl.arc(x,y,3.6,0,7);gl.fill()}
+/* a labelled proposal is exactly that pixel, same footprint as the orange proposal
+   it replaces -- the old r=3.6 disc painted ~3x the area and read as a blob */
+function paintDot(x,y,k){gl.fillStyle=`rgb(${CC[k]})`;gl.fillRect(Math.round(x),Math.round(y),1,1)}
 function drawCursor(x,y,press){g3.save();g3.beginPath();g3.moveTo(x,y);g3.lineTo(x,y+16);g3.lineTo(x+4.2,y+12.4);
  g3.lineTo(x+7.2,y+18.6);g3.lineTo(x+9.9,y+17.3);g3.lineTo(x+6.8,y+11.3);g3.lineTo(x+11.8,y+10.8);g3.closePath();
  g3.fillStyle='#fff';g3.strokeStyle='#15101c';g3.lineWidth=1.3;g3.fill();g3.stroke();
@@ -306,11 +295,13 @@ function render(a,task){
  if(!isFinite(view.s)||view.s<=0)view.s=1;
  if(!isFinite(view.cx))view.cx=S/2; if(!isFinite(view.cy))view.cy=S/2;
  const T=(g)=>{g.setTransform(view.s*K,0,0,view.s*K,K*(S/2-view.cx*view.s),K*(S/2-view.cy*view.s))};
- ID(g1);g1.clearRect(0,0,S,S);g1.fillStyle='#0b080f';g1.fillRect(0,0,S,S);
+ ID(g1);g1.clearRect(0,0,S,S);g1.fillStyle=BG;g1.fillRect(0,0,S,S);
  const src=(a&&a.img)||(sub&&sub.mid);
+ if(a&&a.ctx&&a.ctxImg){T(g1);const k=S/1024,c=a.ctx;g1.imageSmoothingEnabled=true;
+  g1.drawImage(a.ctxImg,c.ox*k,c.oy*k,c.w*k,c.h*k)}
  if(src){T(g1);g1.imageSmoothingEnabled=true;g1.drawImage(src,0,0,S,S);
-  if(mode==='partial'&&a&&a.sparseCv){g1.imageSmoothingEnabled=false;
-   g1.drawImage(a.sparseCv,0,0,S,S);g1.imageSmoothingEnabled=true}}
+  if(mode==='partial'&&a&&a.sparseCv){g1.save();g1.globalAlpha=showOut?0.28:0.6;g1.imageSmoothingEnabled=false;
+   g1.drawImage(a.sparseCv,0,0,S,S);g1.restore()}}
  ID(g2);g2.clearRect(0,0,S,S);
  if(!showOut&&task&&task.t==='blob'&&task.outline&&task.outline.length){
   g2.save();g2.fillStyle='rgba(9,6,13,.5)';g2.fillRect(0,0,S,S);
@@ -327,7 +318,7 @@ function render(a,task){
   g2.restore();
   g2.save();g2.strokeStyle='rgba(255,255,255,.22)';g2.lineWidth=1;g2.setLineDash([5,4]);
   g2.beginPath();g2.roundRect(x,y,w,h,r);g2.stroke();g2.restore();}
- T(g2);g2.drawImage(labCv,0,0,S,S);
+ T(g2);g2.imageSmoothingEnabled=false;g2.drawImage(labCv,0,0,S,S);g2.imageSmoothingEnabled=true;
  ID(g3);g3.clearRect(0,0,S,S);
  if(!a||!sub||!sub.list)return;
  T(g3);g3.lineWidth=2/view.s;
@@ -360,7 +351,123 @@ function render(a,task){
     g3.beginPath();st.pts.slice(0,m).forEach((p,j)=>j?g3.lineTo(p.x,p.y):g3.moveTo(p.x,p.y));
     if(st.closed&&m>=st.pts.length)g3.closePath();
     g3.stroke();n-=st.pts.length;if(n<=0)break}}}
- ID(g3);}
+ ID(g3);
+ const qt=sub&&stage==='annotate'?ITS[qi].queue[sub.k]:null;
+ if(qt&&qt.slide&&sub.navd&&sub.ph!=='nav')crumb(qt.slide,qt);
+ drawPanels()}
+/* ---------- pool & slide levels -------------------------------------------
+   One main stage, three zoom levels. The pool (105 slides) and the slide (its
+   grid of regions) are shown on the SAME canvases as the region, only during
+   select and during the camera moves between regions; while a region is being
+   annotated a small navigator in the top-right corner keeps the slide in view.
+   Cells: cyan = picked this round, white = picked in an earlier round,
+   dim = in the pool, grey+hatched = held-out validation tile (never selectable).
+   Test tiles never appear: the test split shares no slide with the pool. */
+let camSlide=null;                       // slide the camera is currently inside, or null = pool
+const imgs=new Map();
+function img(key,src){ if(imgs.has(key))return imgs.get(key);
+ imgs.set(key,null); if(src)load(src).then(im=>imgs.set(key,im)).catch(()=>{}); return null}
+const lerpR=(a,b,u)=>({x:a.x+(b.x-a.x)*u,y:a.y+(b.y-a.y)*u,w:a.w+(b.w-a.w)*u,h:a.h+(b.h-a.h)*u});
+const FULL={x:0,y:0,w:S,h:S};
+function fitIn(R,cols,rows,pad){const ar=cols/rows;let w=R.w-pad*2,h=w/ar;
+ if(h>R.h-pad*2){h=R.h-pad*2;w=h*ar} return {x:R.x+(R.w-w)/2,y:R.y+(R.h-h)/2,w,h}}
+function wallFit(R){if(!POOL)return null;const sc=Math.min(R.w/POOL.w,R.h/POOL.h);
+ return {sc,ox:R.x+(R.w-POOL.w*sc)/2,oy:R.y+(R.h-POOL.h*sc)/2}}
+function cellRect(sid,R){const s=SLBY[sid],f=wallFit(R);if(!s||!f||!s.cell)return null;
+ return {x:f.ox+s.cell[0]*f.sc,y:f.oy+s.cell[1]*f.sc,w:s.cell[2]*f.sc,h:s.cell[3]*f.sc}}
+function history(sid,upto){const cur=new Set(),past=new Set();
+ for(const I of ITS){if(I.iter>upto)break;for(const p of (I.picks||[]))if(p.slide===sid)(I.iter===upto?cur:past).add(p.r+','+p.c)}
+ return {cur,past}}
+function hatch(g,x,y,w,h){const sp=Math.max(4,Math.min(w,h)/4);g.save();g.beginPath();g.rect(x,y,w,h);g.clip();
+ g.strokeStyle='rgba(255,255,255,.16)';g.lineWidth=1;g.beginPath();
+ for(let k=-h;k<w;k+=sp){g.moveTo(x+k,y+h);g.lineTo(x+k+h,y)}g.stroke();g.restore()}
+function drawWall(g,R,hot,alpha){const f=wallFit(R);if(!f)return;
+ const im=img('wall',POOL.img);
+ g.save();g.globalAlpha=alpha==null?1:alpha;
+ g.fillStyle=BG;g.fillRect(R.x,R.y,R.w,R.h);
+ if(im)g.drawImage(im,f.ox,f.oy,POOL.w*f.sc,POOL.h*f.sc);
+ for(const s of SL){if(!s.cell||!(hot&&hot[s.id]))continue;          // picked slides: outline only
+  const [ox,oy,w,h]=s.cell;
+  g.strokeStyle='rgba(79,217,233,.95)';g.lineWidth=2;
+  g.strokeRect(f.ox+ox*f.sc-1.5,f.oy+oy*f.sc-1.5,w*f.sc+3,h*f.sc+3)}
+ g.restore()}
+function drawSlideGrid(g,R,sid,active,opts){const s=SLBY[sid];if(!s)return null;opts=opts||{};
+ const F=fitIn(R,s.cols,s.rows,opts.pad==null?8:opts.pad), tw=F.w/s.cols, th=F.h/s.rows;
+ const im=img('m:'+sid,s.mid);
+ g.save();
+ g.fillStyle=BG;g.fillRect(R.x,R.y,R.w,R.h);
+ if(im)g.drawImage(im,F.x,F.y,F.w,F.h);
+ else{const c=cellRect(sid,FULL),w=img('wall',POOL&&POOL.img);          // wall crop until the mosaic lands
+  if(w&&c&&POOL){const f=wallFit(FULL);g.drawImage(w,(c.x-f.ox)/f.sc,(c.y-f.oy)/f.sc,c.w/f.sc,c.h/f.sc,F.x,F.y,F.w,F.h)}}
+ const {cur,past}=history(sid,it), thin=opts.thin||1;
+ for(const [r,c,n,v] of s.tiles){const x=F.x+c*tw,y=F.y+r*th,k=r+','+c;
+  if(past.has(k)&&!cur.has(k)){g.strokeStyle='rgba(255,255,255,.7)';g.lineWidth=1.4*thin;g.strokeRect(x+.7,y+.7,tw-1.4,th-1.4)}
+  if(cur.has(k)){g.strokeStyle='rgba(79,217,233,.95)';g.lineWidth=2.2*thin;g.strokeRect(x+1.1,y+1.1,tw-2.2,th-2.2)}
+  if(active&&n===active){g.strokeStyle='#fff';g.lineWidth=2.8*thin;g.strokeRect(x+1.4,y+1.4,tw-2.8,th-2.8)}}
+ g.strokeStyle='rgba(28,23,34,.18)';g.lineWidth=1;g.strokeRect(F.x+.5,F.y+.5,F.w-1,F.h-1);
+ g.restore();
+ return {F,tw,th,cur,past}}
+function regionRect(sid,r,c,R){const s=SLBY[sid];if(!s)return null;const F=fitIn(R,s.cols,s.rows,8);
+ return {x:F.x+c*F.w/s.cols,y:F.y+r*F.h/s.rows,w:F.w/s.cols,h:F.h/s.rows}}
+/* navigator column: pool (small) above slide (medium). Each canvas keeps a
+   device-pixel backing store; drawing happens in CSS px. */
+function ctxOf(id){const c=$(id);if(!c)return null;const g=c.getContext('2d');return {c,g,w:0,h:0}}
+const NP=ctxOf('cp'), NS=ctxOf('cs');
+function sized(n){if(!n)return null;const w=n.c.clientWidth||220,h=n.c.clientHeight||(n===NP?150:220);
+ if(w!==n.w||h!==n.h){n.w=w;n.h=h;n.c.width=Math.round(w*K);n.c.height=Math.round(h*K)}
+ n.g.setTransform(K,0,0,K,0,0);return n}
+let pulse=0;                                        // shared highlight pulse
+function drawPanels(){pulse=(pulse+1)%1000;
+ const qt=sub&&stage==='annotate'?ITS[qi].queue[sub.k]:null;
+ const reveal=stage==='select'&&sub?Math.min(10,Math.floor(sub.t/95)):10;
+ const picks=(ITS[qi].picks||[]).slice(0,reveal), hot={};
+ for(const p of picks)hot[p.slide]=(hot[p.slide]||0)+1;
+ const here=camSlide||(qt&&qt.slide)||null;
+ // --- pool ---
+ const P=sized(NP); if(P){const R={x:0,y:0,w:P.w,h:P.h};
+  P.g.clearRect(0,0,P.w,P.h);drawWall(P.g,R,hot,1);
+  if(here){const c=cellRect(here,R);if(c){P.g.save();P.g.strokeStyle='#fff';P.g.lineWidth=2.2;
+   P.g.strokeRect(c.x-2,c.y-2,c.w+4,c.h+4);P.g.restore()}}
+  $('pli').textContent=stage==='select'?`${reveal}/10 picked · ${Object.keys(hot).length} slides`
+    :`${SL.length} slides · ${Object.keys(hot).length} in this round`}
+ // --- slide ---
+ const Sn=sized(NS); if(Sn){const R={x:0,y:0,w:Sn.w,h:Sn.h};
+  Sn.g.clearRect(0,0,Sn.w,Sn.h);
+  if(!here){Sn.g.fillStyle=BG;Sn.g.fillRect(0,0,Sn.w,Sn.h);
+   Sn.g.fillStyle='rgba(28,23,34,.45)';Sn.g.font='10px "IBM Plex Mono",monospace';Sn.g.textAlign='center';
+   Sn.g.fillText(stage==='select'?'choosing regions…':'—',Sn.w/2,Sn.h/2+4);
+   $('slh').textContent='Slide';$('sli').textContent='—';return}
+  const act=qt&&qt.slide===here?qt.name:null;
+  const res=drawSlideGrid(Sn.g,R,here,act,{pad:5});
+  if(res&&act&&sub&&sub.ph==='nav'){                // pulse the region we are about to open
+   const rr=regionRect(here,qt.r,qt.c,R),a=.35+.45*Math.abs(Math.sin(pulse/6));
+   Sn.g.save();Sn.g.strokeStyle=`rgba(255,255,255,${a})`;Sn.g.lineWidth=4;Sn.g.strokeRect(rr.x-2,rr.y-2,rr.w+4,rr.h+4);Sn.g.restore()}
+  const sl=SLBY[here];
+  $('slh').textContent=here.replace(/-DX1$/,'');
+  $('sli').textContent=`${sl.rows}×${sl.cols} · ${sl.n} regions`+(res?` · ${res.cur.size} now`+(res.past.size?` · ${res.past.size} earlier`:''):'')}}
+/* select stage: the main stage keeps the last region, dimmed, with a caption */
+function dimStage(cap){ID(g2);g2.clearRect(0,0,S,S);g2.fillStyle='rgba(9,6,13,.62)';g2.fillRect(0,0,S,S);
+ ID(g3);g3.clearRect(0,0,S,S);if(cap){g3.save();g3.fillStyle='rgba(255,255,255,.72)';
+ g3.font='500 12px "IBM Plex Mono",monospace';g3.textAlign='center';g3.fillText(cap,S/2,S/2+4);g3.restore()}}
+/* handoff into the next region: the new tile scales in on the main stage while
+   the navigator highlights where it is. No pool or slide on the main stage. */
+function navPlan(from,to,fast){return [{n:'handoff',d:fast?300:560}]}
+function drawNav(step,u,t){const e=easeOut(Math.min(1,u));
+ ID(g1);ID(g2);ID(g3);g1.clearRect(0,0,S,S);g1.fillStyle=BG;g1.fillRect(0,0,S,S);
+ g2.clearRect(0,0,S,S);g3.clearRect(0,0,S,S);
+ const im=sub.navMid;
+ if(im){const k=.86+.14*e,w=S*k,x=(S-w)/2;g1.save();g1.globalAlpha=Math.min(1,.15+e);
+  g1.drawImage(im,x,x,w,w);g1.restore();
+  g3.save();g3.strokeStyle=`rgba(255,255,255,${.9*(1-e)})`;g3.lineWidth=2;g3.strokeRect(x,x,w,w);g3.restore()}
+ crumb(t.slide,t);
+ status(`opening region r${t.r+1}·c${t.c+1} of ${t.slide.replace(/-DX1$/,'')}`);
+ drawPanels()}
+function crumb(sid,tile){const el=$('crumb');if(!el)return;
+ const pool=`<b>pool</b> · ${SL.length} slides`;
+ if(!sid){el.innerHTML=pool;return}
+ const s=SLBY[sid],{cur,past}=history(sid,it);
+ el.innerHTML=`${pool} <span class="sep">▸</span> <b>${sid}</b> · <i>${cur.size} this round</i>`
+  +(past.size?` · ${past.size} earlier`:'')}
 /* ---------- panel ---------- */
 function curve(up){const c=$('curve'),dpr=devicePixelRatio||1,W=c.clientWidth,H=c.clientHeight;
  c.width=W*dpr;c.height=H*dpr;const g=c.getContext('2d');g.scale(dpr,dpr);
@@ -391,9 +498,11 @@ function enter(s){setStage(s);gen++;const my=gen;
  if(s!=='train')$('train').classList.remove('on');
  if(s==='select'){queue(qi);$('chip').textContent=`iteration ${it} / 29`;
   gl.clearRect(0,0,S,S);view={s:1,cx:S/2,cy:S/2};vt={...view};render(null,null);
-  status(`scoring the unlabelled pool · selecting ${ITS[qi].queue.length} most-uncertain tiles`);
-  sub={t:0,d:560,gen:my}}
+  camSlide=null;crumb(null,null);dimStage('scoring 1720 unlabelled regions');drawPanels();
+  status(`scoring the unlabelled pool · selecting ${ITS[qi].queue.length} most-uncertain regions`);
+  sub={t:0,d:1250,gen:my}}
  else if(s==='annotate'){gl.clearRect(0,0,S,S);view={s:1,cx:S/2,cy:S/2};vt={...view};render(null,null);
+  camSlide=null;
   sub={k:0,t:0,ph:'open',a:null,list:[],ti:0,bi:0,cx:S/2,cy:S*.4,tx:S/2,ty:S*.4,pk:null,trace:0,
        gen:my,guard:0,side:0,kA:0,kB:0,zset:false};status('annotating')}
  else if(s==='train'){$('train').classList.add('on');
@@ -412,8 +521,12 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
  if(vTw){vTw.t+=dt/sc;const u=Math.min(1,vTw.t/vTw.d),e=easeOut(u);
    view.cx=lerp(vTw.from.cx,vTw.to.cx,e);view.cy=lerp(vTw.from.cy,vTw.to.cy,e);
    if(u>=1)vTw=null}
- if(stage==='select'){const q=document.querySelectorAll('.q'),n=Math.min(q.length,Math.floor(sub.t/62));
+ if(stage==='select'){const q=document.querySelectorAll('.q'),n=Math.min(q.length,Math.floor(sub.t/95));
   q.forEach((e,j)=>e.style.opacity=j<n?'1':'.16');
+  const hot={};for(const p of (ITS[qi].picks||[]).slice(0,n))hot[p.slide]=(hot[p.slide]||0)+1;
+  const ns=Object.keys(hot).length;
+  $('crumb').innerHTML=`<b>pool</b> · ${SL.length} slides · ${n}/10 regions selected`+(ns?` across <i>${ns} slides</i>`:'');
+  drawPanels();
   if(sub.t>=sub.d){q.forEach(e=>e.style.opacity='');adv()}return}
  if(stage==='train'){$('tp').style.width=Math.min(100,100*sub.t/sub.d)+'%';if(sub.t>=sub.d)adv();return}
  if(stage==='evaluate'){if(sub.t>=sub.d)adv();return}
@@ -421,9 +534,20 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
  if(!t){adv();return}
  qs.forEach((e,j)=>e.classList.toggle('active',j===sub.k));
  sub.guard=(sub.guard||0)+dt/sc;
- if(sub.guard>12000){qs[sub.k]?.classList.add('done');sub.k++;sub.ph='open';sub.a=null;sub.t=0;
+ if(sub.guard>12000){qs[sub.k]?.classList.add('done');sub.k++;sub.navd=false;sub.ph='open';sub.a=null;sub.t=0;
   sub.guard=0;sub.ti=0;sub.bi=0;sub.trace=0;sub.pk=null;sub.zset=false;sub.plist=null;sub.pi=0;goView({s:1,cx:S/2,cy:S/2},380);
   status('skipped a slow tile');return}
+ if(sub.ph==='open'&&!sub.navd&&t.slide&&SLBY[t.slide]){const my=sub.gen;
+  sub.navd=true;sub.ph='nav';sub.t=0;sub.navMid=null;
+  sub.navFrom=camSlide; sub.navPrev=sub.k>0?ITS[qi].queue[sub.k-1]:null; sub.navPrevMid=sub.mid||null;
+  sub.nav=navPlan(camSlide,t.slide,!t.he);
+  load(t.mid).then(im=>{if(sub&&sub.gen===my)sub.navMid=im}).catch(()=>{});
+  return}
+ if(sub.ph==='nav'){const steps=sub.nav||[];let acc=0,i=0;
+  while(i<steps.length&&sub.t>=acc+steps[i].d){acc+=steps[i].d;i++}
+  if(i>=steps.length){camSlide=t.slide;sub.ph='open';sub.t=0;return}
+  const st=steps[i];camSlide=t.slide;
+  drawNav(st.n,(sub.t-acc)/st.d,t);return}
  if(sub.ph==='open'){const my=sub.gen;gl.clearRect(0,0,S,S);sub.zset=false;sub.plist=null;
   goView({s:1,cx:S/2,cy:S/2},200);
   sub.mid=null; load(t.mid).then(im=>{if(sub&&sub.gen===my)sub.mid=im}).catch(()=>{});   // preview always
@@ -436,29 +560,34 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
   return}
  if(sub.ph==='load'){
   ID(g1);ID(g2);ID(g3);
-  g1.clearRect(0,0,S,S);g1.fillStyle='#0b080f';g1.fillRect(0,0,S,S);
+  g1.clearRect(0,0,S,S);g1.fillStyle=BG;g1.fillRect(0,0,S,S);
   if(sub.mid)g1.drawImage(sub.mid,0,0,S,S);
-  g2.clearRect(0,0,S,S);g3.clearRect(0,0,S,S);
+  g2.clearRect(0,0,S,S);g3.clearRect(0,0,S,S); {const qt=ITS[qi].queue[sub.k];if(qt&&qt.slide&&sub.navd)crumb(qt.slide,qt);drawPanels()}
   status('loading tile…');return}
  if(sub.ph==='fast'){const WIPE=160;
   ID(g1);ID(g2);ID(g3);
-  g1.clearRect(0,0,S,S);g1.fillStyle='#0b080f';g1.fillRect(0,0,S,S);
+  g1.clearRect(0,0,S,S);g1.fillStyle=BG;g1.fillRect(0,0,S,S);
   if(sub.mid)g1.drawImage(sub.mid,0,0,S,S);
   g2.clearRect(0,0,S,S);
   const h=Math.min(S,S*sub.t/WIPE);
   if(sub.ov){g2.save();g2.beginPath();g2.rect(0,0,S,h);g2.clip();
    g2.imageSmoothingEnabled=false;g2.drawImage(sub.ov,0,0,S,S);g2.restore()}
   if(h<S){g2.fillStyle='rgba(79,217,233,.7)';g2.fillRect(0,Math.max(0,h-1.5),S,1.5)}
-  g3.clearRect(0,0,S,S);
+  g3.clearRect(0,0,S,S); {const qt=ITS[qi].queue[sub.k];if(qt&&qt.slide&&sub.navd)crumb(qt.slide,qt);drawPanels()}
+  const none=sub.ov&&sub.ov.empty;
+  if(none){g3.save();g3.fillStyle='rgba(255,255,255,.78)';g3.font='500 12px "IBM Plex Mono",monospace';g3.textAlign='center';
+   g3.fillText(mode==='contour'?'no island survived the thin-island filter':'nothing proposed on this tile',S/2,S/2-4);
+   g3.fillStyle='rgba(255,255,255,.5)';g3.font='11px "IBM Plex Mono",monospace';g3.fillText('0 px labelled this round',S/2,S/2+14);g3.restore()}
   status(`fast-forward ${Math.min(sub.k+1,Q.length)}/${Q.length} · `
-   +(mode==='full'?'every region labelled':mode==='partial'?'uncertain pixels labelled':'all islands labelled'));
-  if(sub.t>WIPE+110){qs[sub.k]?.classList.add('done');sub.k++;sub.ph='open';sub.t=0;sub.guard=0}
+   +(none?(mode==='contour'?'no contiguous region passed the filter · nothing to label':'nothing to label')
+     :mode==='full'?'every region labelled':mode==='partial'?'uncertain pixels labelled':'all islands labelled'));
+  if(sub.t>WIPE+110){qs[sub.k]?.classList.add('done');sub.k++;sub.navd=false;sub.ph='open';sub.t=0;sub.guard=0}
   return}
  if(sub.ph==='show'){const L=sub.list.length;
   status(`tile ${sub.k+1}/${Q.length} · ${mode==='full'?L+' boundaries to draw':mode==='partial'?L+' pixel clusters':L+' proposed regions'}`);
   sub.ph='zoomin';sub.t=0;sub.guard=0;sub.zset=false;return}
  const task=sub.list[sub.ti];
- if(!task){qs[sub.k]?.classList.add('done');sub.k++;sub.ph='open';sub.a=null;sub.t=0;
+ if(!task){qs[sub.k]?.classList.add('done');sub.k++;sub.navd=false;sub.ph='open';sub.a=null;sub.t=0;
   sub.zset=false;goView({s:1,cx:S/2,cy:S/2},200);return}
  const a=sub.a;
  /* --- zoom & pan to the work area, like any imaging tool --- */
@@ -472,12 +601,13 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
   sub.tx=c.x;sub.ty=c.y;
   sub.cx=lerp(sub.cx,sub.tx,Math.min(1,dt/135));sub.cy=lerp(sub.cy,sub.ty,Math.min(1,dt/135));
   render(a,task);const p=scr(sub.cx,sub.cy);drawCursor(p.x,p.y,false);
-  status(`${sub.panOnly?'panning to':'zooming to'} ${task.t==='region'?'region':task.t==='brush'?'pixel cluster':task.t==='blob'?'island':'proposed region'} ${sub.ti+1}/${sub.list.length}`);
+  status(task.t==='brush'
+   ?`cluster ${sub.ti+1}/${sub.list.length} · ${task.pts.length} px · ${task.boxes.length} single-class box${task.boxes.length===1?'':'es'}`
+     +(task.rest.length?` · ${task.rest.length} px too mixed to box`:'')
+   :`${sub.panOnly?'panning to':'zooming to'} ${task.t==='region'?'region':task.t==='blob'?'island':'proposed region'} ${sub.ti+1}/${sub.list.length}`);
   if(!navBusy()&&sub.t>220){sub.trace=0;
    sub.bx=0;
-   sub.ph=task.npts?'trace'
-     :(task.t==='blob'&&task.boxy&&mode==='partial')?'marquee'
-     :task.t==='brush'?(task.boxes.length?'marquee':'ptmove'):'pick';
+   sub.ph=task.npts?'trace':task.t==='brush'?(task.boxes.length?'marquee':'ptmove'):'pick';
    sub.t=0;sub.guard=0;sub.pk=null;sub.marq=null;sub.plist=null;sub.pi=0}
   return}
  /* --- draw the closed outline of the region, pen first, class after --- */
@@ -498,13 +628,14 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
   return}
  /* --- choose the class (for a boundary: one side then the other) --- */
  if(sub.ph==='marquee'){const bx=task.boxes&&task.boxes.length?task.boxes[sub.bx||0]:null;
-  const b=bx?bx.bbox:task.bbox,pad=5;
+  const b=bx?bx.bbox:task.bbox,pad=bx?0.5:5;
   const u=Math.min(1,sub.t/420);
   sub.marq={x0:b.x0-pad,y0:b.y0-pad,x1:b.x0-pad+(b.x1-b.x0+pad*2)*u,y1:b.y0-pad+(b.y1-b.y0+pad*2)*u};
   sub.cx=sub.marq.x1;sub.cy=sub.marq.y1;
   render(a,task);const q=scr(sub.cx,sub.cy);drawCursor(q.x,q.y,true);
-  status(bx?`box ${(sub.bx||0)+1}/${task.boxes.length} · ${bx.px.length} px · ${Math.round(bx.pur*100)}% ${CN[bx.k]}`
-           :`box-selecting ${task.parts[0].px.length} px · ${Math.round(task.parts[0].share*100)}% ${CN[task.k]}`);
+  const SHOWB=5,nb=task.boxes?task.boxes.length:0;
+  status(bx?`tight box ${(sub.bx||0)+1}/${Math.min(nb,SHOWB)} · ${bx.px.length} px · all ${CN[bx.k]}`+(nb>SHOWB?` · ${nb-SHOWB} more alike`:'')
+           :`box-selecting ${task.parts[0].px.length} px · ${CN[task.k]}`);
   if(u>=1&&sub.t>520){sub.ph='pick';sub.t=0;sub.pk=null;sub.guard=0}
   return}
  if(sub.ph==='pick'){
@@ -529,19 +660,22 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
     else if(task.t==='blob'){paintPx(part.px,part.k);
       if((sub.pi||0)+1<task.parts.length){sub.pi=(sub.pi||0)+1;sub.pk=null;sub.t=0}
       else{sub.pi=0;sub.ph='confirm';sub.t=0}}
-    else if(task.boxes&&task.boxes.length){const bx=task.boxes[sub.bx||0];
+    else if(task.boxes&&task.boxes.length){const SHOWB=5,bx=task.boxes[sub.bx||0];
       for(const q of bx.px)paintDot(q[0],q[1],bx.k);
       sub.marq=null;
-      if((sub.bx||0)+1<task.boxes.length){sub.bx=(sub.bx||0)+1;sub.pk=null;sub.ph='marquee';sub.t=0}
-      else if(task.rest.length){sub.plist=task.rest.slice(0,3);sub.bi=0;sub.ph='ptmove';sub.t=0}
-      else{sub.ph='confirm';sub.t=0}}
+      if((sub.bx||0)+1<Math.min(task.boxes.length,SHOWB)){sub.bx=(sub.bx||0)+1;sub.pk=null;sub.ph='marquee';sub.t=0}
+      else{for(const b of task.boxes.slice(SHOWB))for(const q of b.px)paintDot(q[0],q[1],b.k);   // same gesture, repeated
+        if(task.rest.length){sub.plist=task.rest.slice(0,5);sub.bi=0;sub.ph='ptmove';sub.t=0}
+        else{sub.ph='confirm';sub.t=0}}}
     sub.guard=0}
   return}
  /* --- mixed clump: point at one pixel, pick that pixel's own class, repeat --- */
  if(sub.ph==='ptmove'||sub.ph==='ptpick'){
   if(!sub.plist){sub.plist=(task.rest&&task.rest.length?task.rest:task.pts).slice(0,5);sub.bi=0}
   const L=sub.plist;
-  if(sub.bi>=L.length){sub.plist=null;sub.ph='confirm';sub.t=0;sub.guard=0;return}
+  if(sub.bi>=L.length){const all=task.rest&&task.rest.length?task.rest:task.pts;
+   for(const q of all.slice(L.length))paintDot(q[0],q[1],q[2]);          // each with its own class
+   sub.plist=null;sub.ph='confirm';sub.t=0;sub.guard=0;return}
   const tgt=L[sub.bi],tk=tgt[2],sp=scr(tgt[0],tgt[1]);
   const ring=()=>{g3.save();g3.strokeStyle='rgba(255,255,255,.92)';g3.lineWidth=1.5;
    g3.beginPath();g3.arc(sp.x,sp.y,8,0,7);g3.stroke();g3.restore()};
@@ -549,9 +683,8 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
    sub.cx=lerp(sub.cx,tgt[0],Math.min(1,dt/95));sub.cy=lerp(sub.cy,tgt[1],Math.min(1,dt/95));
    const hit=Math.hypot(sub.cx-tgt[0],sub.cy-tgt[1])<2/view.s+1.2;
    render(a,task);ring();const q=scr(sub.cx,sub.cy);drawCursor(q.x,q.y,hit);
-   status(task.boxes&&task.boxes.length
-    ?`pixel ${sub.bi+1}/${L.length} · the rest no box could cover`
-    :`pixel ${sub.bi+1}/${L.length} · classes interleaved, only ${Math.round(task.cover*100)}% boxable`);
+   {const all=task.rest&&task.rest.length?task.rest:task.pts,more=all.length-L.length;
+   status(`click ${sub.bi+1}/${L.length}${more>0?` (+${more} more)`:''} · neighbours differ in class, so no box fits`)}
    if(hit&&sub.t>150){sub.ph='ptpick';sub.t=0;sub.pk=null;sub.guard=0}
    return}
   render(a,task);ring();
@@ -572,7 +705,9 @@ function tick(dt){if(!sub)return;const sc=[0,2.4,1.6,1,.68,.45,.3][spd];sub.t+=d
    g3.save();g3.setLineDash([7,5]);g3.lineWidth=2.2;g3.strokeStyle=`rgba(${CC[task.k]},${pulse})`;
    g3.strokeRect(p0.x-pad,p0.y-pad,(p1.x-p0.x)+pad*2,(p1.y-p0.y)+pad*2);g3.restore()}
   const p=scr(sub.cx,sub.cy);drawCursor(p.x,p.y,false);
-  status(`${CN[task.k]} applied · reviewing before moving on`);
+  status(task.t==='brush'
+   ?`${task.pts.length} px labelled · ${task.boxes.length} box${task.boxes.length===1?'':'es'}`+(task.rest.length?` + ${task.rest.length} individual clicks`:'')
+   :`${CN[task.k]} applied · reviewing before moving on`);
   if(sub.t>1150){sub.ph='zoomout';sub.t=0;sub.guard=0}
   return}
  /* --- zoom back out before moving on --- */
@@ -619,7 +754,22 @@ $('outside').onchange=e=>{showOut=e.target.checked};
 $('theme').onclick=()=>{const r=document.documentElement,
  c=r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
  r.setAttribute('data-theme',c==='dark'?'light':'dark');curve(it)};
-addEventListener('resize',()=>curve(it));
+addEventListener('resize',()=>{curve(it);drawPanels()});
 $('tt').textContent='annotation-station — '+PR.find(p=>p.id===mode).h;
 panel(it);enter('select');requestAnimationFrame(loop);
 if(!reduce){playing=true;$('play').textContent='⏸ Pause'}
+/* ?debug=1 -> live readout of the loop state, bottom-left. For diagnosing a frozen page. */
+{const dbg=document.createElement('div');dbg.hidden=true;
+ addEventListener('keydown',e=>{if(e.key==='d'||e.key==='D')dbg.hidden=!dbg.hidden});
+ dbg.style.cssText='position:fixed;left:8px;bottom:8px;z-index:99;font:11px/1.45 ui-monospace,monospace;background:rgba(0,0,0,.86);color:#9fe9f3;padding:7px 9px;border-radius:6px;white-space:pre;pointer-events:none';
+ document.body.appendChild(dbg);
+ let rafN=0;const _r=window.requestAnimationFrame.bind(window);
+ window.requestAnimationFrame=cb=>_r(ts=>{rafN++;cb(ts)});
+ const errs=[];addEventListener('error',e=>errs.push(e.message+' @'+e.lineno));
+ const _ce=console.error;console.error=function(){errs.push([...arguments].map(x=>x&&x.message||String(x)).join(' '));_ce.apply(console,arguments)};
+ setInterval(()=>{const t=sub&&stage==='annotate'?ITS[qi].queue[sub.k]:null;
+  dbg.textContent=`playing=${playing}  reduce-motion=${reduce}  frames=${rafN}\n`
+   +`stage=${stage}  phase=${sub?sub.ph:'-'}  t=${sub?Math.round(sub.t):'-'}  tile#=${sub&&sub.k!=null?sub.k:'-'}\n`
+   +`camera=${camSlide||'pool'}  tile=${t?t.name.slice(0,22):'-'}\n`
+   +`loaded: wall=${!!imgs.get('wall')}  slide=${camSlide?!!imgs.get('m:'+camSlide):'-'}  preview=${sub?!!(sub.navMid||sub.mid):'-'}\n`
+   +`last error: ${errs.length?errs[errs.length-1].slice(0,90):'none'}`},250)}
